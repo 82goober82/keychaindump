@@ -1,8 +1,14 @@
+// I forked this project in order to make use of the output to [volafox project](http://code.google.com/p/volafox)
+
+// memimgkcdump is a proof-of-concept tool for 'keychaindump' function on volafox. output of volafox, keychain master keys, uses them to decrypt keychain files.
+// Main writer's article(keychaindump) see the [blog post](http://juusosalonen.com/post/30923743427/breaking-into-the-os-x-keychain).
+
 // Build instructions:
-// $ gcc keychaindump.c -o keychaindump -lcrypto
+// $ gcc memimgkcdump.c -o memimgkcdump -lcrypto
 
 // Usage:
-// $ sudo ./keychaindump [path to keychain file, leave blank for default]
+// $ ./memimgkcdump [master key candidate(upper)][path to keychain file]
+// example) ./memimgkcdump 9AB40E7378E195335019C5A3577123D5AC814C7D22588B2F login.keychain
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,6 +40,57 @@ int g_credentials_count = 0;
 char **g_master_candidates = 0;
 int g_master_candidates_count = 0;
 
+// source link : http://www.brandonfoltz.com/2012/07/hex-string-to-binary-byte-conversion-function/
+
+/* Returns a byte of value equal to that represented by a 2 character hex
+string. Ex. input of "A4" returns 164. */
+unsigned char byte_from_hex_str(const char *hex_string)
+{
+	unsigned char outbyte = 0;
+	unsigned char value1, value2 = 0;
+	//puts(hex_string);
+ 
+	if (hex_string[0] >= 48 && hex_string[0] <= 57)
+		value1 = hex_string[0] - 48;
+	else if (hex_string[0] >= 65 && hex_string[0] <= 70)
+		value1 = hex_string[0] - 55;
+ 
+	if (hex_string[1] >= 48 && hex_string[1] <= 57)
+		value2 = hex_string[1] - 48;
+	else if (hex_string[1] >= 65 && hex_string[1] <= 70)
+		value2 = hex_string[1] - 55;
+ 
+	//printf("Val1: %d, Val2: %d\n", value1, value2);
+ 
+	outbyte = value1;
+	outbyte = outbyte << 4;
+	outbyte = outbyte + value2;
+	//printf("Outbyte: %d\n", outbyte);
+	return outbyte;
+}
+
+/* Writes a string of bytes to out_bytes converted from the hex values in 
+hex_string. hex_string must be a length divisible by 2. Returns value 0 if 
+completed successfully, 1 on error. */
+int bytes_from_hex_string(unsigned char *out_bytes, const char *hex_string)
+{
+	if (0 != strlen(hex_string) % 2)
+		return 1; //not divisible by 2!
+ 
+	int i = 0;
+	int outbyte_counter = 0;
+	int len = strlen(hex_string);
+	for(i=0;i<len;i+=2)
+	{
+		char hex_string_piece[2] = "";
+		hex_string_piece[0] = *(hex_string+i);
+		hex_string_piece[1] = *(hex_string+(i+1));
+		*(out_bytes+outbyte_counter) = byte_from_hex_str(hex_string_piece);
+		outbyte_counter++;
+	}
+	return 0;
+}
+
 // Writes a hex representation of the bytes in src to the dst buffer.
 // The dst buffer must be at least len*2+1 bytes in size.
 void hex_string(char *dst, char *src, size_t len) {
@@ -41,116 +98,6 @@ void hex_string(char *dst, char *src, size_t len) {
     for (i = 0; i < len; ++i) {
         sprintf(dst+i*2, "%02x", (unsigned char)src[i]);
     }
-}
-
-// Saves a 24-byte sequence that might be a valid master key in the
-// global list. Checks the existing list first to avoid duplicates.
-void add_master_candidate(char *key) {
-    if (!g_master_candidates) {
-        g_master_candidates = malloc(MAX_MASTER_CANDIDATES * sizeof(char *));
-    }
-    
-    // Key already known?
-    int i;
-    for (i = 0; i < g_master_candidates_count; ++i) {
-        if (!memcmp(key, g_master_candidates[i], 24)) return;
-    }
-    
-    if (g_master_candidates_count < MAX_MASTER_CANDIDATES) {
-        char *new = malloc(24);
-        memcpy(new, key, 24);
-        g_master_candidates[g_master_candidates_count++] = new;
-    } else {
-        printf("[-] Too many candidate keys to fit in memory\n");
-        exit(1);
-    }
-}
-
-// Enumerates the system's process list to find the PID of securityd.
-int get_securityd_pid() {
-    int mib[] = {CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0};
-    
-    size_t sz;
-    sysctl(mib, 4, NULL, &sz, NULL, 0);
-
-    struct kinfo_proc *procs = malloc(sz);
-    sysctl(mib, 4, procs, &sz, NULL, 0);
-
-    int proc_count = sz / sizeof(struct kinfo_proc);
-    int i, pid = 0;
-    for (i = 0; i < proc_count; ++i) {
-        struct kinfo_proc *proc = &procs[i];
-        if (!strcmp("securityd", proc->kp_proc.p_comm)) {
-            pid = proc->kp_proc.p_pid;
-            break;
-        }
-    }
-    
-    free(procs);
-    return pid;
-}
-
-// Searches a memory range for anything that looks like a master encryption key
-// and stores each found candidate in the global list of possible master keys.
-void search_for_keys_in_task_memory(mach_port_name_t task, vm_address_t start, vm_address_t stop) {
-    size_t sz = stop - start;
-    char *buffer = malloc(sz);
-    if (!buffer) {
-        printf("[-] Could not allocate memory for key search\n");
-        exit(1);
-    }
-    
-    size_t read_sz;
-    
-    kern_return_t r = vm_read_overwrite(task, start, sz, (vm_address_t)buffer, &read_sz);
-    if (sz != read_sz) printf("[-] Requested %lu bytes, got %lu bytes\n", sz, read_sz);
-
-    if (r == KERN_SUCCESS) {
-        int i;
-        for (i = 0; i < read_sz - sizeof(unsigned long int); i += 4) {
-            unsigned long int *p = (unsigned long int *)(buffer + i);
-            
-            // Look for an 8-byte size field with value 0x18, followed by an 8-byte
-            // pointer to the same memory range we are currently inspecting. Use
-            // the value the pointer points to as a candidate master key.
-            if (*p == 0x18) {
-                vm_address_t address = *(p + 1);
-                if (address >= start && address <= stop) {
-                    char key[24 + 1];
-                    key[24] = 0;
-                    memcpy(key, buffer + address - start, 24);
-                    add_master_candidate(key);
-                }
-            }
-        }
-    } else {
-        printf("[-] Error (%i) reading task memory @ %p\n", r, (void *)start);
-    }
-    
-    free(buffer);
-}
-
-// Uses vmmap to enumerate memory ranges where the keys might be hidden
-// and then searches each range individually for candidate master keys.
-void search_for_keys_in_process(int pid) {
-    mach_port_name_t task;
-    task_for_pid(current_task(), pid, &task);
-    
-    char cmd[128];
-    snprintf(cmd, 128, "vmmap %i", pid);
-    
-    FILE *p = popen(cmd, "r");
-    
-    char line[512];
-    vm_address_t start, stop;
-    while (fgets(line, 512, p)) {
-        if(sscanf(line, "MALLOC_TINY %lx-%lx", &start, &stop) == 2) {
-            printf("[*] Searching process %i heap range 0x%lx-0x%lx\n", pid, start, stop);
-            search_for_keys_in_task_memory(task, start, stop);
-        }
-    }
-    
-    pclose(p);
 }
 
 // Returns an Apple Database formatted 32-bit integer from the given address.
@@ -432,39 +379,21 @@ void print_credentials() {
     for (i = 0; i < g_credentials_count; ++i) {
         t_credentials *cred = &g_credentials[i];
         if (!cred->account && !cred->server) continue;
-        if (!strcmp(cred->account, "Passwords not saved")) continue;
+        if (!strcmp(cred->account, "Passwords not saved")) continue;
         printf("%s:%s:%s\n", cred->account, cred->server, cred->password);
     }
 }
 
 int main(int argc, char **argv) {
-    // Phase 1. Search securityd's memory space for possible master keys.
-    // If the keychain file is unlocked, the real key should be in memory.
-    int pid = get_securityd_pid();
-    if (!pid) {
-        printf("[-] Could not find the securityd process\n");
-        exit(1);
-    }
-    
-    if (geteuid()) {
-        printf("[-] No root privileges, please run with sudo\n");
-        exit(1);
-    }
-    
-    search_for_keys_in_process(pid);
-    
-    printf("[*] Found %i master key candidates\n", g_master_candidates_count);
-    
-    if (!g_master_candidates_count) exit(1);
-    
-    // Phase 2. Try decrypting the wrapping key with each master key candidate
+	if (argc != 3)
+	{
+		printf("usage: %s [master key candidate(Upper)] [keychain file]\n", argv[0]);
+		exit(1);
+	}
+    // Phase 1. Try decrypting the wrapping key with each master key candidate
     // to see which one gives a valid result.
     char filename[512];
-    if (argc < 2) {
-        sprintf(filename, "%s/Library/Keychains/login.keychain", getenv("HOME"));
-    } else {
-        sprintf(filename, "%s", argv[1]);
-    }
+    sprintf(filename, "%s", argv[2]);
     
     FILE *f = fopen(filename, "rb");
     if (!f) {
@@ -482,16 +411,20 @@ int main(int argc, char **argv) {
     printf("[*] Trying to decrypt wrapping key in %s\n", filename);
 
     char key[24];
-    int i, key_len = 0;
-    for (i = 0; i < g_master_candidates_count; ++i) {
-        char s_key[24*2+1];
-        hex_string(s_key, g_master_candidates[i], 24);
-        printf("[*] Trying master key candidate: %s\n", s_key);
-        if (key_len = dump_wrapping_key(key, g_master_candidates[i], buffer, sz)) {
-            printf("[+] Found master key: %s\n", s_key);
-            break;
-        }
+    int key_len = 0;
+
+    char m_key[24+1] = {'0',};
+    printf("[*] Trying master key candidate: %s\n", argv[1]);
+    if(bytes_from_hex_string(m_key, argv[1]))
+    {
+    	printf("[+] Invalid Key Size\n");
+    	exit(1);
     }
+    
+    if (key_len = dump_wrapping_key(key, m_key, buffer, sz)) {
+        printf("[+] Found master key: %s\n", argv[1]);
+    }
+    
     if (!key_len) {
         printf("[-] None of the master key candidates seemed to work\n");
         exit(1);
@@ -501,7 +434,7 @@ int main(int argc, char **argv) {
     hex_string(s_key, key, 24);
     printf("[+] Found wrapping key: %s\n", s_key);
     
-    // Phase 3. Using the wrapping key, dump all credentials from the keychain
+    // Phase 2. Using the wrapping key, dump all credentials from the keychain
     // file into the global credentials list and decrypt everything.
     dump_keychain(key, buffer);
     decrypt_credentials();
