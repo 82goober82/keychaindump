@@ -2,7 +2,7 @@
 
 I forked this project in order to make use of the output to [volafox project](http://code.google.com/p/volafox)
 
-memimgkcdump is a proof-of-concept tool for 'keychaindump' function on volafox. output of volafox, keychain master keys, uses them to decrypt keychain files.
+memimgkcdump is a proof-of-concept tool for 'keychaindump' function on volafox. output of volafox, master key candidates, uses them to decrypt keychain files.
 
 Main writer's article(keychaindump) see the [blog post](http://juusosalonen.com/post/30923743427/breaking-into-the-os-x-keychain).
 
